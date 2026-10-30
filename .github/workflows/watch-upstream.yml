@@ -1,0 +1,71 @@
+name: Watch upstream release
+
+# Unattended trigger. Upstream cannot wake our Actions, so this polls its
+# release list and, when a new stable version exists that this repo has no tag
+# for, creates that tag. Creating the tag is the whole job — build.yml reacts to
+# the tag and does the building, testing and pushing.
+#
+# All decision logic lives in scripts/watch-upstream.sh so it can be run (and
+# debugged) outside Actions.
+on:
+  schedule:
+    # Upstream ships days to weeks apart. Every 4 hours is plenty; a tighter
+    # cadence only burns Actions minutes on a private repo.
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Force a specific upstream version instead of the newest stable one"
+        required: false
+        type: string
+
+permissions:
+  contents: write      # create and push the tag
+
+concurrency:
+  group: watch-upstream
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve newest usable upstream release
+        id: watch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          FORCED_VERSION: ${{ inputs.version }}
+        run: ./scripts/watch-upstream.sh
+
+      - name: Refuse to continue on an unverifiable release
+        if: steps.watch.outputs.action == 'blocked'
+        run: |
+          echo "::error::upstream ${{ steps.watch.outputs.version }} cannot be containerized safely (missing prebuilt binary or SHA256SUMS). No tag created."
+          exit 1
+
+      - name: Explain a no-op
+        if: steps.watch.outputs.action == 'skip'
+        run: |
+          echo "No new upstream release to build: ${{ steps.watch.outputs.tag }} already exists." >> "$GITHUB_STEP_SUMMARY"
+          echo "Newest upstream version: ${{ steps.watch.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create the tag that starts the build
+        if: steps.watch.outputs.action == 'tag'
+        env:
+          VERSION: ${{ steps.watch.outputs.version }}
+        run: |
+          set -euo pipefail
+          # An annotated tag needs an identity; the checkout has none by default.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "containerize upstream apt-cacher-ultra ${VERSION}"
+          git push origin "refs/tags/v${VERSION}"
+          {
+            echo "Tagged **v${VERSION}**; \`build.yml\` now builds, smoke-tests and publishes it."
+            echo
+            echo "- upstream release: https://github.com/linsomniac/apt-cacher-ultra/releases/tag/${VERSION}"
+            echo "- asset verified against upstream SHA256SUMS by scripts/fetch-upstream.sh"
+          } >> "$GITHUB_STEP_SUMMARY"

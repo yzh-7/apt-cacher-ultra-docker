@@ -1,0 +1,239 @@
+name: Build and publish image
+
+# Triggered by a version tag created in watch-upstream.yml, by a pull request
+# (build + test only, no publish), and by hand.
+#
+# Order matters here: the image is built, loaded, smoke-tested, and only then
+# pushed. A version tag that has ever been published therefore describes an
+# image that passed the smoke test.
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream version to containerize (defaults to the tag that triggered this run)"
+        required: false
+        type: string
+      publish:
+        description: "Push to GHCR (default: push on tag runs, never on PR runs)"
+        required: false
+        type: boolean
+  # Called by rebuild-base.yml. The inputs mirror workflow_dispatch so a reusable
+  # invocation cannot accidentally publish something a human did not ask for.
+  workflow_call:
+    inputs:
+      version:
+        description: "Upstream version to containerize"
+        required: false
+        type: string
+      publish:
+        description: "Push to GHCR"
+        required: false
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  BASE_IMAGE: alpine:3.20
+  # Package name in GHCR. Keep this distinct from any repository you own with a
+  # colliding name, otherwise GitHub maps the package to that repository and the
+  # GITHUB_TOKEN of this repository is not allowed to write it.
+  IMAGE_NAME: apt-cacher-ultra
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve the version to build
+        id: ver
+        run: |
+          set -euo pipefail
+          REF="${GITHUB_REF_NAME}"
+          INPUT="${{ inputs.version }}"
+          if [[ -n "${INPUT}" ]]; then VERSION="${INPUT#v}"; else VERSION="${REF#v}"; fi
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::cannot derive an upstream version from '${REF}' (got '${VERSION}')"
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          # PRs and hand runs without an explicit publish never touch the registry.
+          PUBLISH=false
+          if [[ "${{ github.event_name }}" == "push" ]]; then PUBLISH=true; fi
+          if [[ "${{ inputs.publish }}" == "true" ]]; then PUBLISH=true; fi
+          echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
+          echo "building apt-cacher-ultra ${VERSION}, publish=${PUBLISH}"
+
+      - name: Download and verify the upstream binary against upstream SHA256SUMS
+        run: |
+          set -euo pipefail
+          ./scripts/fetch-upstream.sh '${{ steps.ver.outputs.version }}' dist
+          # Published later as an output value: YAML bodies are not shells, so the
+          # digest has to be captured here rather than interpolated at render time.
+          echo "ACU_SHA256=$(sha256sum dist/apt-cacher-ultra | cut -d' ' -f1)" >> "$GITHUB_ENV"
+
+      - name: Fetch the upstream packaged config for that exact version
+        run: |
+          set -euo pipefail
+          VERSION='${{ steps.ver.outputs.version }}'
+          curl -fsSL --retry 3 --max-time 60 \
+            -o dist/config.upstream.toml \
+            "https://raw.githubusercontent.com/linsomniac/apt-cacher-ultra/${VERSION}/packaging/config/config.toml.default"
+          grep -q '^\[cache\]' dist/config.upstream.toml
+          echo "upstream config for ${VERSION} fetched ($(wc -l < dist/config.upstream.toml) lines)"
+
+      - name: Derive the container config the image will actually run with
+        run: |
+          set -euo pipefail
+          # --enable-adoption: the packaged default leaves adoption off, which means
+          # no signing keys are loaded at all. CI must exercise the path a real
+          # deployment runs (verified snapshots), not the packaged default.
+          ./deploy/make-container-config.sh poc dist/config.upstream.toml dist/config.container.toml --enable-adoption
+          echo "--- diff against the upstream packaged config ---"
+          diff -u dist/config.upstream.toml dist/config.container.toml || true
+
+      - name: Resolve the base image digest
+        id: base
+        run: |
+          set -euo pipefail
+          DIGEST=$(docker buildx imagetools inspect "${BASE_IMAGE}" --format '{{.Manifest.Digest}}')
+          echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "base ${BASE_IMAGE} = ${DIGEST}"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (load locally, do not push yet)
+        uses: docker/build-push-action@v6
+        with:
+          # Context is dist/ on purpose: the only thing the image copies is the
+          # checksum-verified binary fetch-upstream.sh put there.
+          context: ./dist
+          file: ./Dockerfile
+          load: true
+          tags: acu-smoke:local
+          platforms: linux/amd64
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+            BASE_IMAGE_RESOLVED=${{ steps.base.outputs.digest }}
+            ACU_VERSION=${{ steps.ver.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || github.run_started_at }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Start it with the same mounts a real deployment uses
+        run: |
+          set -euo pipefail
+          install -d -m 0755 /tmp/acu-smoke/cache
+          # uid/gid 113:112 is what the image runs as.
+          sudo chown 113:112 /tmp/acu-smoke/cache
+          docker run -d --name acu-smoke \
+            --network host \
+            --read-only \
+            --tmpfs /tmp:size=64m,mode=1777 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --pids-limit 1024 \
+            -v /tmp/acu-smoke/cache:/var/lib/apt-cacher-ultra \
+            -v "$PWD/dist/config.container.toml:/etc/apt-cacher-ultra/config.toml:ro" \
+            -v /usr/share/keyrings:/keyrings/usr-share-keyrings:ro \
+            -v /etc/apt/trusted.gpg.d:/keyrings/etc-apt-trusted.gpg.d:ro \
+            -v /etc/apt/keyrings:/keyrings/etc-apt-keyrings:ro \
+            acu-smoke:local
+          # Let the daemon open its database and start its first freshness pass.
+          sleep 12
+
+      - name: Smoke test before anything is published
+        run: |
+          set -euo pipefail
+          ./scripts/smoke-test.sh \
+            --admin http://127.0.0.1:16789 \
+            --proxy http://127.0.0.1:16790 \
+            --container acu-smoke \
+            --version '${{ steps.ver.outputs.version }}' \
+            --min-keys 9 \
+            --expect-key-path /keyrings/
+
+      - name: Show what the container logged
+        if: always()
+        run: docker logs acu-smoke 2>&1 | tail -40 || true
+
+      - name: Stop the test container
+        if: always()
+        run: docker rm -f acu-smoke >/dev/null 2>&1 || true
+
+      - uses: docker/login-action@v3
+        if: steps.ver.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish the image that just passed the smoke test
+        if: steps.ver.outputs.publish == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ./dist
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
+            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-b${{ github.run_number }}
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+            BASE_IMAGE_RESOLVED=${{ steps.base.outputs.digest }}
+            ACU_VERSION=${{ steps.ver.outputs.version }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp || github.run_started_at }}
+            VCS_REF=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Record what was published
+        if: steps.ver.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          DIGEST=$(docker buildx imagetools inspect "ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}" --format '{{.Manifest.Digest}}')
+          {
+            echo "### Published apt-cacher-ultra ${{ steps.ver.outputs.version }}"
+            echo
+            echo "| item | value |"
+            echo "|---|---|"
+            echo "| image | \`ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}\` |"
+            echo "| also tagged | \`latest\`, \`${{ steps.ver.outputs.version }}-b${{ github.run_number }}\` |"
+            echo "| manifest digest | \`${DIGEST}\` |"
+            echo "| upstream binary sha256 | \`${{ env.ACU_SHA256 }}\` |"
+            echo "| base image | \`${{ env.BASE_IMAGE }}\` = \`${{ steps.base.outputs.digest }}\` |"
+            echo
+            echo "Smoke test passed before publishing: healthz, keyring mount, upstream fetch then cache hit, real apt download, MITM leaf verified against the container CA, admin endpoint guarded."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create a release note for the published version
+        if: steps.ver.outputs.publish == 'true' && github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          append_body: true
+          body: |
+            Container image for upstream apt-cacher-ultra ${{ steps.ver.outputs.version }}.
+
+            ```
+            docker pull ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+            ```
+
+            Upstream release: https://github.com/linsomniac/apt-cacher-ultra/releases/tag/${{ steps.ver.outputs.version }}
+            Upstream binary sha256: `${{ env.ACU_SHA256 }}`
+            Built by run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

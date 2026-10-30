@@ -1,0 +1,26 @@
+version: 2
+updates:
+  # Keeps the Alpine base in the Dockerfile current. The weekly rebuild refreshes
+  # already-published images; this opens a pull request so the pin in source
+  # moves too, and CI's smoke test has to pass before it can merge.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      time: "04:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+    labels: [dependencies, base-image]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      time: "04:10"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+    labels: [dependencies, ci]

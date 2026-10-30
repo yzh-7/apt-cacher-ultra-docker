@@ -1,0 +1,66 @@
+# Trial deployment that must not interfere with an already-running instance.
+#
+# Use this when the host still runs the .deb/systemd service on :3142 and you want
+# to prove the container works on the same machine before deciding to switch over.
+# It uses different ports, a different container name, and a separate cache
+# directory, so it can run side by side with the systemd service.
+#
+#   cd deploy
+#   ../scripts/fetch-upstream.sh 1.0.2 ../dist
+#   ACU_ENABLE_ADOPTION=1 ACU_OUT_CONFIG=/etc/apt-cacher-ultra/config.poc.toml \
+#     sudo -E ./prepare.sh /data/harbor/acu-poc/cache ../dist/config.upstream.toml poc
+#   ACU_CONFIG=/etc/apt-cacher-ultra/config.poc.toml \
+#   ACU_CACHE_DIR=/data/harbor/acu-poc/cache \
+#   ACU_ADMIN_PROBE=127.0.0.1:16789 \
+#     docker compose -f compose.poc.yaml up -d
+#
+#   ../scripts/smoke-test.sh --admin http://127.0.0.1:16789 --proxy http://127.0.0.1:16790 \
+#     --container apt-cacher-ultra-poc --version 1.0.2 --min-keys 9
+#
+# The PoC cache is throwaway. Its MITM CA is generated fresh, so do not distribute
+# that CA to clients — a PoC CA and a production CA are different certificates.
+#
+# prepare.sh in poc mode binds both listeners to 127.0.0.1, so only this machine
+# can reach the PoC proxy. To test from another host, edit the generated config's
+# [cache] listen to 0.0.0.0:16790 (and leave [admin] on loopback).
+#
+# The .deb service's config at /etc/apt-cacher-ultra/config.toml is read as the
+# source for prepare.sh (inheriting its tuned retention/GC/MITM settings) but is
+# never modified by anything here.
+
+services:
+  apt-cacher-ultra-poc:
+    image: ${ACU_IMAGE:-ghcr.io/yzh-7/apt-cacher-ultra:latest}
+    container_name: apt-cacher-ultra-poc
+    restart: unless-stopped
+    network_mode: host
+
+    user: "${ACU_UID:-113}:${ACU_GID:-112}"
+
+    volumes:
+      - ${ACU_CACHE_DIR:-/data/harbor/acu-poc/cache}:/var/lib/apt-cacher-ultra
+      - ${ACU_CONFIG:-/etc/apt-cacher-ultra/config.poc.toml}:/etc/apt-cacher-ultra/config.toml:ro
+      - /usr/share/keyrings:/keyrings/usr-share-keyrings:ro
+      - /etc/apt/trusted.gpg.d:/keyrings/etc-apt-trusted.gpg.d:ro
+      - /etc/apt/keyrings:/keyrings/etc-apt-keyrings:ro
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 1024
+
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
+
+    stop_grace_period: 40s
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://${ACU_ADMIN_PROBE:-127.0.0.1:16789}/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

@@ -1,0 +1,74 @@
+# Fallback build: compile apt-cacher-ultra from the upstream release tarball.
+#
+# Used only when a release publishes no linux-amd64 binary — scripts/watch-upstream
+# reports action=blocked for that case rather than shipping an unverified binary,
+# and this file is the manual follow-up:
+#
+#   docker build -f Dockerfile.source --build-arg ACU_VERSION=1.0.2 -t apt-cacher-ultra:1.0.2-src .
+#
+# Trade-off versus the normal Dockerfile: the resulting binary is built here, so
+# upstream's SHA256SUMS no longer applies to it and the build needs network plus a
+# Go toolchain (a few hundred MB of layers, not shipped in the final image).
+#
+# Keep GO_IMAGE at or above the `go` directive in the release's go.mod. It is a
+# build-time pin, not part of the published image.
+
+ARG GO_IMAGE=golang:1.25-alpine
+ARG ACU_VERSION
+ARG SOURCE_URL
+
+FROM ${GO_IMAGE} AS build
+ARG ACU_VERSION
+ARG SOURCE_URL
+ARG GOPROXY=https://proxy.golang.org,direct
+
+RUN apk add --no-cache curl ca-certificates make tar zstd
+
+RUN set -eux; \
+    url="${SOURCE_URL:-https://github.com/linsomniac/apt-cacher-ultra/releases/download/${ACU_VERSION}/apt-cacher-ultra-${ACU_VERSION}-source.tar.gz}"; \
+    curl -fsSL --retry 3 --max-time 900 -o /tmp/src.tar.gz "$url"; \
+    mkdir -p /src; \
+    tar -xzf /tmp/src.tar.gz -C /src --strip-components=1; \
+    cd /src; \
+    test -f go.mod; \
+    # CGO is disabled deliberately: modernc.org/sqlite is pure Go, so the output
+    # runs on a scratch-sized base with no libc.
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+      go build -trimpath \
+        -ldflags "-s -w -X main.Version=${ACU_VERSION}" \
+        -o /out/apt-cacher-ultra ./cmd/apt-cacher-ultra; \
+    # main.Version is what `-version` prints; upstream injects it the same way in
+    # its Makefile. Without it the binary reports "dev" and deploy verification
+    # cannot confirm which version is running.
+    test "$(/out/apt-cacher-ultra -version | tr -d '[:space:]')" = "${ACU_VERSION}"
+
+FROM alpine:3.20
+
+ARG ACU_VERSION=unknown
+ARG BUILD_DATE=unknown
+ARG VCS_REF=unknown
+
+LABEL org.opencontainers.image.title="apt-cacher-ultra" \
+      org.opencontainers.image.description="Robust apt repository cache (built from the upstream release source)" \
+      org.opencontainers.image.version="${ACU_VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.source="https://github.com/linsomniac/apt-cacher-ultra" \
+      org.opencontainers.image.licenses="CC0-1.0" \
+      io.aptcacherultra.docker.build-mode="source"
+
+RUN apk add --no-cache ca-certificates \
+ && addgroup -g 112 -S acu \
+ && adduser -u 113 -G acu -S -D -H -u 113 -h /var/lib/apt-cacher-ultra -s /sbin/nologin acu \
+ && mkdir -p /etc/apt-cacher-ultra /var/lib/apt-cacher-ultra \
+ && chown -R 113:112 /var/lib/apt-cacher-ultra
+
+COPY --from=build /out/apt-cacher-ultra /usr/local/bin/apt-cacher-ultra
+RUN chmod 0755 /usr/local/bin/apt-cacher-ultra && /usr/local/bin/apt-cacher-ultra -version
+
+USER 113:112
+VOLUME ["/var/lib/apt-cacher-ultra"]
+EXPOSE 3142 6789
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD wget -qO- http://127.0.0.1:6789/healthz >/dev/null 2>&1 || exit 1
+ENTRYPOINT ["/usr/local/bin/apt-cacher-ultra", "-config", "/etc/apt-cacher-ultra/config.toml"]

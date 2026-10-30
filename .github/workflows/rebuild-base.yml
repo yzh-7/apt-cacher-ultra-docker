@@ -1,0 +1,83 @@
+name: Refresh base image
+
+# ca-certificates is a security-relevant part of this image: it is what the
+# daemon uses to verify upstream repositories. A pinned version tag therefore
+# carries a frozen Alpine, and a host that pins `1.0.2` never sees a renewed
+# certificate bundle. This workflow rebuilds the newest version on a schedule so
+# `latest` stays current, and records in the run summary whether anything
+# actually changed.
+#
+# Version tags are never moved by this job: pin a digest for reproducibility,
+# follow `latest` for currency.
+on:
+  schedule:
+    - cron: "23 4 * * 1"     # Monday 04:23 UTC
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Upstream version to rebuild (defaults to the newest tag in this repo)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: rebuild-base
+  cancel-in-progress: false
+
+jobs:
+  newest:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+      changed: ${{ steps.pick.outputs.changed }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pick the version and compare its base image digest
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          IMAGE: ghcr.io/${{ github.repository_owner }}/apt-cacher-ultra
+          FORCED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${FORCED}"
+          if [[ -z "${VERSION}" ]]; then
+            VERSION=$(./scripts/newest-tag.sh "${GH_REPO}" || echo "")
+          fi
+          if [[ -z "${VERSION}" ]]; then
+            echo "::notice::no version tag exists in this repository yet; nothing to refresh"
+            echo "version=" >> "$GITHUB_OUTPUT"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+          # The digest Alpine had when this image was published is stored in an
+          # image label by build.yml.
+          BUILT=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
+                    --format '{{ index .Config.Labels "io.aptcacherultra.docker.base-image-digest" }}' 2>/dev/null || echo unknown)
+          NOW=$(docker buildx imagetools inspect alpine:3.20 --format '{{.Manifest.Digest}}')
+
+          if [[ "${BUILT}" == "${NOW}" ]]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Base image unchanged (${NOW}); no rebuild needed for ${VERSION}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "Base image moved from ${BUILT} to ${NOW}; rebuilding ${VERSION}." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  rebuild:
+    needs: newest
+    if: needs.newest.outputs.changed == 'true' && needs.newest.outputs.version != ''
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.newest.outputs.version }}
+      publish: true
+    permissions:
+      contents: read
+      packages: write
