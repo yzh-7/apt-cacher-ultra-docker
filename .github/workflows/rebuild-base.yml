@@ -78,6 +78,9 @@ jobs:
     with:
       version: ${{ needs.newest.outputs.version }}
       publish: true
+    # The called job declares contents: write (its release-note step), so the
+    # caller has to grant it even though that step is skipped for a reusable
+    # invocation. GitHub rejects a call whose callee asks for more than granted.
     permissions:
-      contents: read
+      contents: write
       packages: write

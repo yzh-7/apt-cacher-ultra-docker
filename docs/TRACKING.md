@@ -77,6 +77,26 @@ KEEP_REHEARSAL=1 ./scripts/ci-rehearsal.sh   # 保留 .rehearsal/ 与本地镜�
 
 用途有三个：上游发了新版但还不想打 tag 时先确认能构建；CI 红了在本地复现；换一台机器时确认它的 Docker 能跑这套镜像。监听端口固定用 poc 的 16789/16790 且绑 loopback，所以在生产缓存机上跑也不会被外部访问、不会和 `:3142`/`:6789` 抢端口。
 
+## 版本是怎么定下来的（`scripts/resolve-version.sh`）
+
+| 触发方式 | 构建哪个版本 | 是否推 GHCR |
+|---|---|---|
+| tag push `v1.1.0` | `1.1.0` | 是 |
+| `workflow_dispatch` 填了 version | 填的那个（可带 `v`） | 看 `publish` 输入 |
+| `workflow_dispatch` 没填 | 上游最新可用 release | 否 |
+| `pull_request`（ref 是 `12/merge`） | 上游最新可用 release | 否 |
+| 复用调用（`rebuild-base.yml`） | 传入的 version | 是 |
+
+PR 也必须有版本可构建，所以不能因为 ref 不是版本号就失败——这是之前设计里的一个真错误：`VERSION="${REF#v}"` 对 PR 得到 `12/merge`，正则不过就 `exit 1`，于是**每个 PR 的 CI 必红**。
+
+## 权限为什么是这个形状
+
+| workflow | 权限 | 为什么 |
+|---|---|---|
+| `watch-upstream.yml` | `contents: write` | 要创建并推送 tag |
+| `build.yml`（job 级） | `contents: write` + `packages: write` | `packages: write` 推 GHCR；`contents: write` 只为了最后那一步 Release 说明——少了它 `softprops/action-gh-release` 会 403，于是**镜像构建、测试、发布全成功，run 仍然是红的** |
+| `rebuild-base.yml` 调用 `build.yml` | 也必须给 `contents: write` | GitHub 不允许被复用的 workflow 要求比调用方授予的更多权限，哪怕那一步在这条路径上会被跳过 |
+
 ## 失败模式与查看位置
 
 | 现象 | 在哪看 | 处理 |

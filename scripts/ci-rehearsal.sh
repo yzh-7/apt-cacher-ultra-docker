@@ -39,18 +39,17 @@ command -v docker >/dev/null || die "docker is required"
 
 # --- 1. version ---------------------------------------------------------------
 log "1. resolve version"
+# Same helper the workflow uses, with the rehearsal's own event name, so version
+# selection here cannot drift from what CI will do.
 VERSION="${1:-}"
-if [[ -z "${VERSION}" ]]; then
-  # Same contract the workflow uses: the watcher writes key=value lines to
-  # GITHUB_OUTPUT, narration goes to stderr.
-  outputs=$(mktemp)
-  GITHUB_OUTPUT="${outputs}" ./scripts/watch-upstream.sh
-  watch_rc=$?
-  VERSION=$(sed -n 's/^version=//p' "${outputs}" | head -1)
-  action=$(sed -n 's/^action=//p' "${outputs}" | head -1)
-  rm -f "${outputs}"
-  (( watch_rc == 0 )) || die "watch-upstream.sh reported ${action:-unknown} for the newest upstream release"
+out=$(mktemp)
+if ! EVENT_NAME=rehearsal REF_NAME=rehearsal INPUT_VERSION="${VERSION}" \
+     GITHUB_OUTPUT="${out}" ./scripts/resolve-version.sh; then
+  rm -f "${out}"; die "could not resolve an upstream version"
 fi
+VERSION=$(sed -n 's/^version=//p' "${out}" | head -1)
+rm -f "${out}"
+[[ -n "${VERSION}" ]] || die "resolve-version.sh produced no version"
 [[ -n "${VERSION}" ]] || die "could not resolve an upstream version; pass one explicitly"
 echo "version=${VERSION}"
 

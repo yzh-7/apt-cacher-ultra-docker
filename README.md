@@ -70,6 +70,7 @@ scripts/
   fetch-upstream.sh         取上游 release 二进制，按 SHA256SUMS 校验
   watch-upstream.sh         发现新版本 / 判断是否已构建（供 Actions 调用）
   newest-tag.sh             本仓库最新的 v* tag
+  resolve-version.sh        CI 用哪个版本、是否发布的唯一判定处（可本地跑）
   ci-rehearsal.sh           在任意有 Docker 的机器上预演 CI 的构建与发布门槛
   metrics-snapshot.sh       把值得盯的指标一次读出来（含 MITM CA 到期时间）
   smoke-test.sh             10 项部署验证（CI 发布前的门槛）

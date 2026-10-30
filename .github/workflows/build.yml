@@ -54,27 +54,29 @@ concurrency:
 jobs:
   build-test-publish:
     runs-on: ubuntu-latest
+    # contents: write is for the release note at the end, which only runs on a tag
+    # push. Without it softprops/action-gh-release fails with 403 and the run is red
+    # even though the image built, tested and published fine.
+    permissions:
+      contents: write
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
       - name: Resolve the version to build
         id: ver
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish }}
         run: |
           set -euo pipefail
-          REF="${GITHUB_REF_NAME}"
-          INPUT="${{ inputs.version }}"
-          if [[ -n "${INPUT}" ]]; then VERSION="${INPUT#v}"; else VERSION="${REF#v}"; fi
-          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
-            echo "::error::cannot derive an upstream version from '${REF}' (got '${VERSION}')"
-            exit 1
-          fi
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          # PRs and hand runs without an explicit publish never touch the registry.
-          PUBLISH=false
-          if [[ "${{ github.event_name }}" == "push" ]]; then PUBLISH=true; fi
-          if [[ "${{ inputs.publish }}" == "true" ]]; then PUBLISH=true; fi
-          echo "publish=${PUBLISH}" >> "$GITHUB_OUTPUT"
-          echo "building apt-cacher-ultra ${VERSION}, publish=${PUBLISH}"
+          # The rules live in scripts/resolve-version.sh so they can be run and
+          # checked outside Actions. A pull request has to build something, and its
+          # ref name ("12/merge") is not a version, so the fallback there is the
+          # newest usable upstream release.
+          ./scripts/resolve-version.sh | tee -a "$GITHUB_OUTPUT"
 
       - name: Download and verify the upstream binary against upstream SHA256SUMS
         run: |
