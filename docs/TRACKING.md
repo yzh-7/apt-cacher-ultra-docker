@@ -65,6 +65,18 @@
 
 如果上游某次 release **没有** `linux-amd64` 资产或没有 `SHA256SUMS`，`watch-upstream.sh` 会输出 `action=blocked`，workflow 失败并说明缺什么；这时用 `Dockerfile.source` 手工构建（已在服务器上验证过：从上游 source tarball 构建，产物 `-version` 报 `1.0.2`）。
 
+## 发布前在本地预演整条流水线
+
+`scripts/ci-rehearsal.sh` 把 `build.yml` 那个 job 除"登录 GHCR / 写 Release 说明"之外的每一步原样跑一遍：解析版本 → 取二进制并按 `SHA256SUMS` 校验 → 从该 tag 的上游默认配置派生容器配置 → 构建 → 按部署形态起容器 → 跑发布门槛的冒烟测试。退出码就是冒烟测试的退出码。
+
+```bash
+./scripts/ci-rehearsal.sh                # 版本取上游最新稳定版
+./scripts/ci-rehearsal.sh 1.1.0          # 指定版本
+KEEP_REHEARSAL=1 ./scripts/ci-rehearsal.sh   # 保留 .rehearsal/ 与本地镜像便于排查
+```
+
+用途有三个：上游发了新版但还不想打 tag 时先确认能构建；CI 红了在本地复现；换一台机器时确认它的 Docker 能跑这套镜像。监听端口固定用 poc 的 16789/16790 且绑 loopback，所以在生产缓存机上跑也不会被外部访问、不会和 `:3142`/`:6789` 抢端口。
+
 ## 失败模式与查看位置
 
 | 现象 | 在哪看 | 处理 |

@@ -28,7 +28,10 @@ FORCED="${FORCED_VERSION:-}"
 APPLY="${APPLY:-0}"
 
 say() { printf '%s\n' "$*" >&2; }
-emit() { say "$1=$2"; [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; return 0; }
+# Results go to stdout so the script can be captured when run outside Actions;
+# the same lines are appended to GITHUB_OUTPUT for the workflow. Narration stays
+# on stderr, so `./watch-upstream.sh | grep ^action=` is a meaningful local check.
+emit() { printf '%s=%s\n' "$1" "$2"; [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"; return 0; }
 
 command -v curl >/dev/null || { say "curl is required"; exit 2; }
 command -v python3 >/dev/null || { say "python3 is required"; exit 2; }
