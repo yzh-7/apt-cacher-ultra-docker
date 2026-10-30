@@ -181,26 +181,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ github.token }}
 
-      - name: Publish the image that just passed the smoke test
+      - name: Publish the image that passed the smoke test
         if: steps.ver.outputs.publish == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: ./dist
-          file: ./Dockerfile
-          push: true
-          platforms: linux/amd64
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:latest
-            ghcr.io/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-b${{ github.run_number }}
-          build-args: |
-            BASE_IMAGE=${{ env.BASE_IMAGE }}
-            BASE_IMAGE_RESOLVED=${{ steps.base.outputs.digest }}
-            ACU_VERSION=${{ steps.ver.outputs.version }}
-            BUILD_DATE=${{ github.event.head_commit.timestamp || github.run_started_at }}
-            VCS_REF=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+        run: |
+          set -euo pipefail
+          # Re-tag and push the image the smoke test just exercised instead of
+          # building again. A second build would use the same inputs, but "same
+          # inputs" is a weaker claim than "the bytes that were verified": what
+          # lands in the registry is now literally the tested image.
+          base="ghcr.io/${GITHUB_REPOSITORY_OWNER}/${IMAGE_NAME}"
+          v="${{ steps.ver.outputs.version }}"
+          for tag in "${v}" latest "${v}-b${{ github.run_number }}"; do
+            docker tag acu-smoke:local "${base}:${tag}"
+            docker push "${base}:${tag}"
+          done
 
       - name: Record what was published
         if: steps.ver.outputs.publish == 'true'

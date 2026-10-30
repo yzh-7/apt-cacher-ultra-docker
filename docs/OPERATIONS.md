@@ -10,15 +10,28 @@ docker logs --since 1h apt-cacher-ultra 2>&1 | grep -ciE 'level=ERROR'
 
 关键指标（`curl -s http://127.0.0.1:6789/metrics`）：
 
+以下名字是从这台机器的 `/metrics`（738 行）里实际抓出来的，不是推测；`acu_keyring*` 这类**不存在**，密钥环数量只有状态页有（`smoke-test.sh` 因此读状态页）。
+
 | 指标 | 看什么 |
 |---|---|
 | `acu_blobs_db_count` / `acu_blobs_db_total_bytes` | 缓存体量与增长趋势 |
 | `acu_suites_tracked` | 已跟踪的 suite 数（应与在用的仓库数量级一致） |
-| `acu_snapshots_current` / `acu_snapshots_stale` | 快照是否新鲜；stale 长期 >0 说明 adoption 或回源有问题 |
-| `acu_http_requests_total` | 按 outcome 分类，`hit` 占比就是缓存有效性 |
-| `acu_gpg_key_status` | 密钥状态；`loaded_ok` 数量应与密钥环数量一致 |
-| `acu_tls_mitm_generated_total` / `acu_tls_mitm_denied_total` | MITM 在签 / 在拒；denied 突增说明 `allowed_host_regex` 与在用域名不一致 |
-| `acu_upstream_fetch_failures_total` | 回源失败计数 |
+| `acu_freshness_stale_suites` | 索引过期的 suite 数；长期 >0 说明刷新或回源有问题 |
+| `acu_snapshots_current` / `acu_snapshots_displaced` | 采纳了多少快照、替换掉多少旧快照 |
+| `acu_adoption_total` / `acu_adoption_members_skipped_total` | adoption 在跑还是被跳过；skipped 增长要看 reason |
+| `acu_requests_total{outcome=…,host=…}` | `outcome="hit"` 占比就是缓存有效性 |
+| `acu_blobs_zero_refcount_backlog` / `acu_blobs_actually_reapable` / `acu_gc_blobs_reaped_total` | GC 有没有在回收；backlog 只涨不降就是 GC 没干活 |
+| `acu_mitm_cert_issued_total` / `acu_mitm_cert_cache_lookups_total` | MITM 在签多少证书、缓存命中如何 |
+| `acu_mitm_ca_not_after_unixtime` | **CA 到期时间**，比事后发现客户端报错早很多 |
+| `acu_admin_refresh_failures_total` / `acu_admin_refresh_last_success_unixtime` | 状态页后台刷新的健康度 |
+| `acu_inflight_requests` / `acu_request_duration_seconds_*` | 负载与延迟分布 |
+
+一条现成的读数命令（同一个脚本可以直接放进巡检 cron）：
+
+```bash
+./scripts/metrics-snapshot.sh                    # 默认 http://127.0.0.1:6789
+./scripts/metrics-snapshot.sh http://127.0.0.1:16789   # 验证实例
+```
 
 ## 2. 容量
 
