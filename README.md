@@ -13,19 +13,22 @@
 
 ## 已验证到什么程度
 
-2026-10-30 在目标机 `172.31.0.3`（Ubuntu 24.04，Docker 29.6）上把 CI 的每一步真实跑过一遍：
+2026-10-30 在目标机 `172.31.0.3`（Ubuntu 24.04，Docker 29.6）上把每一步真实跑过一遍：
 
-```
-fetch-upstream.sh 1.0.2      → sha256 085a0dff…b5343 与上游 SHA256SUMS 一致
-make-container-config.sh     → 只改 4 处，diff 可审阅
-prepare.sh                   → 缓存目录 113:112、keyring 目录检查
-docker build -f Dockerfile   → 镜像 compact 17.7 MB
-docker run（hardened 参数）   → healthy、restarts=0、read_only、cap_drop ALL
-scripts/smoke-test.sh        → 10 项全 PASS：
-    healthz / 30 把密钥环 / 21 把来自挂载的宿主 keyring / 上游取包 1.4 MB /
-    第二次命中缓存 outcome=hit / apt-get download 成功 / MITM HTTPS 用容器自身 CA 验证通过 /
-    admin 监听在 loopback / 二进制版本一致 / 缓存数据库非空
-```
+| 步骤 | 结果 |
+|---|---|
+| `fetch-upstream.sh 1.0.2` | sha256 `085a0dff…b5343`，与上游 `SHA256SUMS` 一致 |
+| `make-container-config.sh` | 只改 4 处（+ `--enable-adoption` 时 5 处），diff 可审阅 |
+| `prepare.sh` | 缓存目录建成 `113:112`，三个 keyring 目录检查通过 |
+| `docker build -f Dockerfile` | 成功，compact 体积 17.7 MB（`docker images` 显示 36.9 MB） |
+| `docker build -f Dockerfile.source` | 成功，产物 `-version` 报 `1.0.2`（不是 `dev`） |
+| 推 Harbor → 从 Harbor 拉回 | `172.31.0.3:7777/infrastructure/apt-cacher-ultra:1.0.2`，digest `55e0d47d…` |
+| `compose.poc.yaml` 起服务 | 镜像只从 Harbor 拉（本地同名镜像已删），healthy，与 systemd 实例并存不打架 |
+| `scripts/smoke-test.sh` | **10/10 PASS**：healthz、30 把密钥环、其中 21 把来自挂载的宿主 keyring、真实上游取包 1.4 MB、第二次 `outcome=hit`、`apt-get download` 成功、MITM HTTPS 用容器自身 CA 验证通过、admin 只在 loopback、二进制版本一致、缓存数据库非空 |
+| 根盘影响 | `df -h /` 前后都是 609G/73%，缓存 2.0 MB 全在 `/data/harbor` |
+| `acu-sync.timer` | 安装并 enabled，手动触发一次 service 退出码 0，日志正常 |
+
+尚未完成的只有 GitHub 侧：仓库还没建（等 PAT），所以 Actions 首次绿与 GHCR 推镜像还没发生。
 
 ## 5 分钟上手（已有镜像的机器）
 
