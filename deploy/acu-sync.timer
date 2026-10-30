@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly GHCR to Harbor mirror of apt-cacher-ultra images
+
+[Timer]
+# Run once shortly after boot (a host that was down should catch up) and then
+# hourly. Persistent makes a missed run fire as soon as the machine is back.
+OnBootSec=5min
+OnCalendar=hourly
+Persistent=true
+AccuracySec=5m
+
+[Install]
+WantedBy=timers.target

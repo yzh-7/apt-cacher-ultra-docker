@@ -1,0 +1,25 @@
+[Unit]
+Description=Mirror apt-cacher-ultra images from GHCR into the local Harbor registry
+Documentation=file:/usr/local/src/apt-cacher-ultra-docker/docs/OPERATIONS.md
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=15min
+
+# The credentials live in one root-readable file, not in this unit:
+#   install -m 0600 deploy/harbor-sync.env /etc/apt-cacher-ultra-docker/harbor-sync.env
+#
+# ACU_SYNC_ENV, not EnvironmentFile: systemd's EnvironmentFile keeps quote
+# characters literal, and a Harbor robot name is "robot$project+user" wrapped in
+# quotes in that file. harbor-sync.sh parses the file itself, so point it there.
+Environment=ACU_SYNC_ENV=/etc/apt-cacher-ultra-docker/harbor-sync.env
+
+ExecStart=/usr/local/src/apt-cacher-ultra-docker/harbor-sync.sh
+
+# Runs as root because it needs the Docker daemon socket. It only pulls, tags and
+# pushes images; nothing here restarts the apt cache service.
+
+[Install]
+WantedBy=multi-user.target

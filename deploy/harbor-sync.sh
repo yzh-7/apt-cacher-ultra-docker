@@ -17,7 +17,24 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${0}")" && pwd)"
-[[ -r "${SCRIPT_DIR}/harbor-sync.env" ]] && { . "${SCRIPT_DIR}/harbor-sync.env"; }
+ENV_FILE="${ACU_SYNC_ENV:-${SCRIPT_DIR}/harbor-sync.env}"
+
+# Read KEY=VALUE defaults from the env file without letting it override variables
+# the caller already set — `GHCR_IMAGE=… ./harbor-sync.sh` has to win over a
+# stale value in the file, and `source` cannot express that. Values are taken
+# literally (surrounding quotes stripped, no shell expansion), so a robot account
+# name containing '$' survives intact.
+if [[ -r "${ENV_FILE}" ]]; then
+  while IFS='=' read -r key val; do
+    key="${key#"${key%%[![:space:]]*}"}"
+    [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    val="${val#"${val%%[![:space:]]*}"}"
+    [[ "${val}" == \"*\" || "${val}" == \'*\' ]] && val="${val:1:${#val}-2}"
+    [[ -n "${!key:-}" ]] && continue
+    printf -v "${key}" '%s' "${val}"
+    export "${key}"
+  done < "${ENV_FILE}"
+fi
 
 GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/yzh-7/apt-cacher-ultra}"
 # GHCR credentials are optional. A public package pulls anonymously, which keeps
@@ -56,9 +73,30 @@ fi
 printf '%s' "${HARBOR_PASSWORD}" | docker login "${HARBOR_REGISTRY}" -u "${HARBOR_USER}" --password-stdin >/dev/null
 log "logged in to ${HARBOR_REGISTRY} as ${HARBOR_USER}"
 
-# Digest lookups must not abort the run: a tag that does not exist upstream yet
-# is the normal state right before the next release, not an error.
-digest() { docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${1}" 2>/dev/null || true; }
+# Digest of a tag, used to decide whether a copy is needed at all. Two paths
+# because the tools differ: `docker buildx imagetools inspect` speaks TLS and has
+# no insecure flag, so a plain-HTTP Harbor has to be asked through the
+# distribution API instead — Docker-Content-Digest is the manifest digest.
+# A lookup that fails is not fatal: a tag missing upstream is the normal state
+# right before a release.
+MANIFEST_ACCEPT='application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.docker.distribution.manifest.list.v2+json'
+
+insecure_host() { docker info 2>/dev/null | sed -n '/Insecure Registries/,/^[A-Z]/p' | grep -qF -- "${1}"; }
+
+digest() {
+  local ref="${1}" host rest path tag
+  host="${ref%%/*}"
+  rest="${ref#*/}"
+  tag="${ref##*:}"
+  path="${rest%:*}"
+  if insecure_host "${host}"; then
+    curl -fsS -u "${HARBOR_USER}:${HARBOR_PASSWORD}" -H "Accept: ${MANIFEST_ACCEPT}" \
+           -D - -o /dev/null "http://${host}/v2/${path}/manifests/${tag}" 2>/dev/null \
+      | tr -d '\r' | awk -F': ' 'tolower($1)=="docker-content-digest"{printf "%s", $2}' || true
+  else
+    docker buildx imagetools inspect --format '{{.Manifest.Digest}}' "${ref}" 2>/dev/null || true
+  fi
+}
 
 pushed=0
 skipped=0
@@ -71,7 +109,7 @@ for tag in ${SYNC_TAGS}; do
   # reason and makes the timer safe to run every hour.
   src_digest=$(digest "${src}")
   if [[ -z "${src_digest}" ]]; then
-    log "SKIP  ${src} (not present in GHCR)"
+    log "SKIP  ${src} (not present upstream)"
     skipped=$((skipped + 1))
     continue
   fi
