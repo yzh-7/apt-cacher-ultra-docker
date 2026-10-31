@@ -28,6 +28,13 @@
 | 根盘影响 | `df -h /` 前后都是 609G/73%，缓存 2.0 MB 全在 `/data/harbor` |
 | `acu-sync.timer` | 安装并 enabled，手动触发一次 service 退出码 0，日志正常 |
 | `scripts/ci-rehearsal.sh` | 在目标机完整预演 CI 的构建+门槛：**exit 0，10/10 PASS**（缓存命中 3 ms 对比回源 8238 ms） |
+| Actions 首次运行（tag push `v1.0.2`） | [run #1](https://github.com/yzh-7/apt-cacher-ultra-docker/actions/runs/41161108441) 22/22 步 success，CI 内冒烟同样 10 PASS |
+| GHCR 包 | `ghcr.io/yzh-7/apt-cacher-ultra` 的 `1.0.2` / `latest` / `1.0.2-b9`，digest `sha256:e9fb53a2…`，**可匿名拉取** |
+| Harbor 镜像 | `172.31.0.3:7777/infrastructure/apt-cacher-ultra` 两个 tag 的 digest 与 GHCR 完全一致 |
+| 用 Harbor 里的 CI 产物再起一次服务 | `prepare.sh` + `compose.poc.yaml` + 冒烟 10 PASS；两轮真实 `apt-get update` 后 `hit 5 / miss 7` |
+| `watch-upstream.yml` 手动触发 | 判定 `v1.0.2 already exists` → `action=skip`，不重复建 tag |
+| `rebuild-base.yml` 手动触发（修好之后） | `newest` success、`rebuild` **skipped**（基础镜像没动就不重建） |
+| Dependabot | 自行开出 6 个 PR（5 个 actions + alpine 3.20→3.24），每个 PR 的 `build.yml` 都是绿的，已全部合并 |
 
 尚未完成的只有 GitHub 侧：仓库还没建（等 PAT），所以 Actions 首次绿与 GHCR 推镜像还没发生。
 

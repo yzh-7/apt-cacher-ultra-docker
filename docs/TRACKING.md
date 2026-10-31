@@ -65,6 +65,28 @@
 
 如果上游某次 release **没有** `linux-amd64` 资产或没有 `SHA256SUMS`，`watch-upstream.sh` 会输出 `action=blocked`，workflow 失败并说明缺什么；这时用 `Dockerfile.source` 手工构建（已在服务器上验证过：从上游 source tarball 构建，产物 `-version` 报 `1.0.2`）。
 
+## 基础镜像在哪里声明，周重建怎么判定
+
+**唯一声明处是 `Dockerfile` 的 `ARG BASE_IMAGE=`。** `build.yml`、`rebuild-base.yml`、`scripts/ci-rehearsal.sh` 都用
+`sed -n 's/^ARG BASE_IMAGE=//p' Dockerfile` 读它。之前 `build.yml` 在 `env:` 里也写了一份 `BASE_IMAGE`，而 workflow env 会静默压过
+Dockerfile 的默认值——于是 Dependabot 把 fallback 的 `Dockerfile.source` 提到 Alpine 3.24 之后，主路径还在构建 3.20，
+而且**已发布镜像的 label 证实了这点**。Dependabot 的 docker 生态只解析字面 `FROM` 行，看不见 `ARG` 默认值，所以主路径的基础镜像必须人工（或按下面的机制）升。
+
+`rebuild-base.yml` 每周比的是"已发布镜像 label 里记录的 Alpine digest"与"当前 `${BASE_IMAGE}` 的 manifest digest"：
+
+- 相等 → 不动。
+- 不等 → 通过 `uses:` 复用 `build.yml` 重建并重发同样的版本号（`latest` 与 `<ver>-b<run>` 会移动，`<ver>` 也重打，因为换基础镜像就是要替换它）。
+- label 读不到 → **明确失败**并说明原因。这一条是修出来的：原来表达式写成了 `.Config.Labels`（imagetools 没有 `.Config` 字段），
+  命令报错又被 `|| echo unknown` 吞掉，于是 `BUILT` 永远是 `unknown`，**每周都会无条件重建**。
+
+判断它有没有在瞎重建，看 Actions 里 `Refresh base image` 的历史：正常情况下大多数周应该是 `rebuild` job 被 skip。
+
+## Dependabot 的实际效果（已验证）
+
+仓库建好当天它就开了 6 个 PR：5 个 actions 版本 + 1 个 `alpine 3.20 → 3.24`。每个 PR 的 `build.yml` 都是绿的——
+PR 触发时没有版本号可用，走的是"回退到上游最新可用 release"这条路（见上面的版本表），所以 PR 的 CI 真的会构建并跑完 10 项冒烟门槛。
+合并后由 `workflow_dispatch`（或下一次 `v*` tag）产出正式镜像。
+
 ## 发布前在本地预演整条流水线
 
 `scripts/ci-rehearsal.sh` 把 `build.yml` 那个 job 除"登录 GHCR / 写 Release 说明"之外的每一步原样跑一遍：解析版本 → 取二进制并按 `SHA256SUMS` 校验 → 从该 tag 的上游默认配置派生容器配置 → 构建 → 按部署形态起容器 → 跑发布门槛的冒烟测试。退出码就是冒烟测试的退出码。
