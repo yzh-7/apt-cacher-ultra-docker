@@ -29,7 +29,16 @@ docker pull 172.31.0.3:7777/infrastructure/apt-cacher-ultra:1.0.2
 docker build -f Dockerfile -t apt-cacher-ultra:1.0.2 dist
 ```
 
-镜像里有什么：Alpine 基础 + `ca-certificates` + 16 MB 静态二进制（`ldd` = not a dynamic executable，SQLite 走纯 Go 的 `modernc.org/sqlite`，OpenPGP 走 Go 库，**不需要 gnupg**）。compact 体积 17.7 MB，空闲 RSS 约 14 MB。
+镜像里有什么：Alpine 基础 + `ca-certificates` + 一个静态二进制（`ldd` = not a dynamic executable，SQLite 走纯 Go 的 `modernc.org/sqlite`，OpenPGP 走 Go 库，**不需要 gnupg**）。
+
+体积有两个实测读数，口径不同，别混用：
+
+| 读数 | 值 | 含义 |
+|---|---|---|
+| `docker image inspect --format '{{.Size}}'` | 10.5 MB | registry 里压缩层的总和，也就是拉取要走的字节 |
+| `docker images` | 37.8 MB | 解开之后占用磁盘的量（Docker 29 的显示口径） |
+
+空闲 RSS 约 14 MB。基础发行版由 `Dockerfile` 的 `ARG BASE_IMAGE` 决定，当前是 `alpine:3.24`；已发布镜像里 `/etc/alpine-release` 是 `3.24.3`。
 
 ---
 
