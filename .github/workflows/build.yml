@@ -176,7 +176,7 @@ jobs:
         if: always()
         run: docker rm -f acu-smoke >/dev/null 2>&1 || true
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: steps.ver.outputs.publish == 'true'
         with:
           registry: ghcr.io
