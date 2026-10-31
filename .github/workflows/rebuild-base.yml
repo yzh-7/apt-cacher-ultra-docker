@@ -57,11 +57,31 @@ jobs:
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          # The digest Alpine had when this image was published is stored in an
-          # image label by build.yml.
-          BUILT=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
-                    --format '{{ index .Config.Labels "io.aptcacherultra.docker.base-image-digest" }}' 2>/dev/null || echo unknown)
-          NOW=$(docker buildx imagetools inspect alpine:3.20 --format '{{.Manifest.Digest}}')
+          # The Alpine digest an image was built against is stored in a label by
+          # build.yml. The template field is .Image.Config.Labels — imagetools has no
+          # .Config — and the earlier broken expression was swallowed by
+          # "|| echo unknown", so every weekly run rebuilt.
+          BASE=$(sed -n 's/^ARG BASE_IMAGE=//p' Dockerfile | head -1)
+          test -n "${BASE}" || { echo "::error::could not read ARG BASE_IMAGE from Dockerfile"; exit 1; }
+          echo "comparing the published image against live ${BASE}" >> "$GITHUB_STEP_SUMMARY"
+
+          if ! BUILT=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
+                        --format '{{ index .Image.Config.Labels "io.aptcacherultra.docker.base-image-digest" }}' 2>/tmp/built.err); then
+            cat /tmp/built.err >&2
+            if grep -qiE "not found|manifest unknown" /tmp/built.err; then
+              echo "::warning::no published image for ${VERSION}; rebuilding to create one"
+              echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::error::could not read the base-image label of ${IMAGE}:${VERSION}; refusing to guess"
+            exit 1
+          fi
+          if [[ -z "${BUILT}" || "${BUILT}" == "unknown" ]]; then
+            echo "::error::${IMAGE}:${VERSION} carries no base-image label (built before labels existed, or built elsewhere)"
+            exit 1
+          fi
+          NOW=$(docker buildx imagetools inspect "${BASE}" --format '{{.Manifest.Digest}}')
 
           if [[ "${BUILT}" == "${NOW}" ]]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"

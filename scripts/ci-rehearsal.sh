@@ -16,7 +16,9 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${0}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-BASE_IMAGE="${BASE_IMAGE:-alpine:3.20}"
+# The Dockerfile ARG default is the single declaration of the base image.
+BASE_IMAGE="${BASE_IMAGE:-$(sed -n "s/^ARG BASE_IMAGE=//p" "${REPO_DIR}/Dockerfile" | head -1)}"
+[[ -n "${BASE_IMAGE}" ]] || die "could not read ARG BASE_IMAGE from Dockerfile"
 IMAGE_NAME="${IMAGE_NAME:-apt-cacher-ultra}"
 WORK_DIR="${REHEARSAL_DIR:-${REPO_DIR}/.rehearsal}"
 CONTAINER="${REHEARSAL_CONTAINER:-acu-rehearsal}"

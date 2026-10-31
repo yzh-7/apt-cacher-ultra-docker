@@ -14,7 +14,7 @@
 # The binary must be present in the build context; scripts/fetch-upstream.sh
 # downloads it and verifies it against upstream's SHA256SUMS asset.
 
-ARG BASE_IMAGE=alpine:3.20
+ARG BASE_IMAGE=alpine:3.24
 FROM ${BASE_IMAGE}
 
 # Re-declared after FROM: an ARG declared before FROM is not in scope in the

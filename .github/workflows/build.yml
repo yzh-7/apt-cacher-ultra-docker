@@ -41,7 +41,6 @@ permissions:
   packages: write
 
 env:
-  BASE_IMAGE: alpine:3.20
   # Package name in GHCR. Keep this distinct from any repository you own with a
   # colliding name, otherwise GitHub maps the package to that repository and the
   # GITHUB_TOKEN of this repository is not allowed to write it.
@@ -62,6 +61,18 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v7
+
+      - name: Read the base image from the Dockerfile
+        run: |
+          set -euo pipefail
+          # The Dockerfile ARG default is the single declaration of the base image.
+          # A workflow-level env override silently beats it, which is how a Dependabot
+          # bump to Alpine 3.24 landed on the fallback Dockerfile while this workflow
+          # went on building Alpine 3.20.
+          BASE=$(sed -n 's/^ARG BASE_IMAGE=//p' Dockerfile | head -1)
+          test -n "${BASE}" || { echo "::error::could not read ARG BASE_IMAGE from Dockerfile"; exit 1; }
+          echo "BASE_IMAGE=${BASE}" >> "$GITHUB_ENV"
+          echo "base image for this build: ${BASE}"
 
       - name: Resolve the version to build
         id: ver
