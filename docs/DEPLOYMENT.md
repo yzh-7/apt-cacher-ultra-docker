@@ -154,6 +154,37 @@ http_proxy=http://172.31.0.3:3142 apt-get update
 
 ---
 
+### 一个会踩的坑：不要把 apt 源写成缓存地址
+
+下面这种写法**不行**：
+
+```
+deb http://172.31.0.3:3142/ubuntu noble main      # 会得到 400 Bad Request
+```
+
+因为 apt 走"origin-form"请求（`GET /ubuntu/...` + `Host: 172.31.0.3`），daemon 从 `Host` 反推上游主机，而那是缓存自己，不是任何上游 → 请求被判 `outcome=bad`（实测 400）。
+
+正确写法是让源保持真实主机名，把代理指过去（就是上面 §6 那段 apt.conf）：
+
+```
+deb http://archive.ubuntu.com/ubuntu noble main
+```
+```
+Acquire::http::Proxy "http://172.31.0.3:3142";
+```
+
+这样 daemon 看到的是 `canonical_host=archive.ubuntu.com`，才能正确建 key、命中缓存。日志里两种形态一眼可分辨：
+
+```
+level=INFO msg=request ... canonical_host=archive.ubuntu.com path=/ubuntu/dists/noble/InRelease outcome=miss
+```
+
+### 新实例的 adoption 不会立刻跑
+
+刚起一个空缓存的实例，`acu_suites_tracked` 会随客户端 `apt-get update` 立刻涨（实测 4），但快照 adoption 按自己的节奏跑（这台机器上 `[gc] interval = "1h"`），所以 `acu_adoption_total` 与 `acu_snapshots_current` 一开始是 0 是**正常**的，不是坏了。
+
+`POST /reconcile` 不能催动一个还没有快照的 suite——实测返回 409 `reconcile not triggered (busy, unknown, or no current snapshot)`。它只对已有快照的 suite 有意义。判断新实例是否健康要看：`outcome=hit` 是否出现、`acu_suites_tracked` 是否随客户端增长、`acu_adoption_total` 是否在一个 interval 之后开始增长。
+
 ## 7. 部署后验证（必做）
 
 ```bash
@@ -228,7 +259,8 @@ tar 里必须包含 `ca/`（CA 的私钥 `ca.key` 权限 0600，备份介质要�
 | 客户端 `certificate issuer is unknown` | 客户端没装缓存的 CA，而该源走 HTTPS | 装 §5 的 CA，或给该客户端把 https 代理设为 `DIRECT` |
 | 客户端 `NO_PUBKEY …` / `InRelease is not signed` | 客户端侧缺仓库 keyring（与缓存无关） | 在客户端装该仓库 key 到 `/etc/apt/keyrings` |
 | `:3142` 被占，容器起不来 | systemd 版还在跑 | `systemctl stop && systemctl disable apt-cacher-ultra` |
-| 状态页/`/metrics` 谁都看得到的 `POST /reconcile` | `[admin] listen = 0.0.0.0:6789` 且 `htpasswd_file = ""` | 改回 `127.0.0.1:6789`，或配 `htpasswd_file`，或防火墙限内网 |
+| 状态页/`/metrics` 谁都看得到的 `POST /reconcile` | `[admin] listen = 0.0.0.0:6789` 且 `htpasswd_file = ""`（1.0.2 里 `X-ACU-Admin` 头并不能挡住未授权调用：实测有无该头都是 409） | 改回 `127.0.0.1:6789`，或配 `htpasswd_file`，或防火墙限内网 |
+| `apt-get update` 对缓存地址报 `400 Bad Request`，日志 `outcome=bad` | 把 apt 源直接写成了缓存主机（见 §6 的坑） | 源保持真实主机名，用 `Acquire::http::Proxy` 指过去 |
 | 缓存目录一直涨 | `gc.url_path_ttl = "0s"`（永不过期） | 设 `url_path_ttl`（如 `"180d"`）或加容量告警，见 OPERATIONS.md |
 
 看日志与状态：
