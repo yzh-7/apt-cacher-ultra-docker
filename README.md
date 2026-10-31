@@ -35,6 +35,7 @@
 | `watch-upstream.yml` 手动触发 | 判定 `v1.0.2 already exists` → `action=skip`，不重复建 tag |
 | `rebuild-base.yml` 手动触发（修好之后） | `newest` success、`rebuild` **skipped**（基础镜像没动就不重建） |
 | Dependabot | 自行开出 6 个 PR（5 个 actions + alpine 3.20→3.24），每个 PR 的 `build.yml` 都是绿的，已全部合并 |
+| skill 的四个脚本（`locate`/`plan`/`deploy`/`rollback`） | 在目标机上跑完整流程：计划 → `--apply` → 按 digest 部署 → 冒烟 **10 PASS** → 回滚再验证 **10 PASS**；`review-skill` 机械校验 **PASS（阻断 0 · 建议 0 · 提示 0）** |
 
 尚未完成的只有 GitHub 侧：仓库还没建（等 PAT），所以 Actions 首次绿与 GHCR 推镜像还没发生。
 
@@ -83,20 +84,57 @@ scripts/
   smoke-test.sh             10 项部署验证（CI 发布前的门槛）
 deploy/
   compose.yaml              生产形态 compose（host 网络、只读根、cap_drop ALL）
+  compose.poc.yaml          并行试点形态（16790/16789，不动现有服务）
   prepare.sh                缓存目录权限、配置派生、keyring 目录检查
   make-container-config.sh  从宿主 config.toml 派生容器配置（含 --enable-adoption）
   harbor-sync.sh            GHCR → 内网 Harbor 镜像同步（按 digest 幂等）
   .env.example              compose 变量
   harbor-sync.env.example   同步所需凭据样例（真文件不进 git）
+  acu-sync.service/.timer   每小时同步一次的 systemd 单元
 docs/
   DEPLOYMENT.md             部署手册
-  OPERATIONS.md            运维手册
-  TRACKING.md              流水线与 secrets
+  OPERATIONS.md             运维手册
+  TRACKING.md               流水线与 secrets
 .github/workflows/
   watch-upstream.yml        定时轮询上游 → 打 tag
   build.yml                 构建 + 冒烟 + 发布（可被复用调用）
   rebuild-base.yml          基础镜像变化时每周重建
 .github/dependabot.yml      基础镜像与 Actions 版本升级
+.qoder/skills/apt-cacher-ultra-docker/
+  SKILL.md                  给 agent 的流程与判断规则
+  scripts/                  locate / plan / deploy / verify / rollback / mirror-sync
+  references/               部署细节、实测坑、registry 流程
+  assets/                   apt 代理配置片段、同步 env 模板
+```
+
+## 给 agent 用的 skill
+
+仓库自带一个 skill：`.qoder/skills/apt-cacher-ultra-docker/`。它不重复实现部署逻辑，只负责**判断**和**编排**，实际动作调本仓库已验证的脚本。
+
+```bash
+ln -s "$PWD/.qoder/skills/apt-cacher-ultra-docker" ~/.dsh/skills/apt-cacher-ultra-docker   # 本机可用
+cp -r .qoder/skills/apt-cacher-ultra-docker <别的项目>/.qoder/skills/                      # 跟着项目走
+```
+
+四个脚本，默认都是先判断再动手：
+
+| 脚本 | 作用 |
+|---|---|
+| `locate.sh` | 找到仓库 checkout（`ACU_REPO` → 常见路径 → 克隆） |
+| `plan.sh` | **决定缓存放哪块盘、继承哪份配置、能不能占端口**，打印全部理由；dry-run 默认，`--apply` 才落盘 |
+| `deploy.sh` | 按 digest 起服务，紧接着跑冒烟门禁；缺 `--cache-dir/--config` 会拒绝并先打印计划 |
+| `verify.sh` | 十项门禁 + 指标快照，退出码即门禁结果 |
+| `rollback.sh` | 按 digest 回滚（cache/config 从运行中的容器反查），回滚后强制重新验证 |
+| `mirror-sync.sh` | 外部 registry → 内网 registry，凭据只从 `--env-file` 读 |
+
+`plan.sh` 的存储判定是硬规则：不选系统盘、不选不在 `/etc/fstab` 里的挂载、不选备份卷、低于容量门槛不选；已有缓存在跑时沿用它所在的盘但换目录。判断不出来的时候它**拒绝动手**并提问，而不是猜一个。在这台机器上的实际输出：
+
+```
+选定 /data/harbor/apt-cacher-ultra-container （盘 /data/harbor，剩余约 10534G）
+排除 /：系统盘（已用 73%）
+排除 /mnt/data1：不在 /etc/fstab 里，重启后可能不存在（缓存目录会变空，CA 会丢）
+排除 /mnt/backup：卷名表明它是备份/归档/交换用途
+ASK - 选中的 /data/harbor 同时是镜像 registry 存数据的盘，会互相挤容量。接受，还是换一块盘？
 ```
 
 ## 必须知道的三件事
