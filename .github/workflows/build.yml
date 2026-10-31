@@ -219,7 +219,7 @@ jobs:
 
       - name: Create a release note for the published version
         if: steps.ver.outputs.publish == 'true' && github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           append_body: true
