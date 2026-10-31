@@ -34,7 +34,7 @@ jobs:
       version: ${{ steps.pick.outputs.version }}
       changed: ${{ steps.pick.outputs.changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Pick the version and compare its base image digest
         id: pick
